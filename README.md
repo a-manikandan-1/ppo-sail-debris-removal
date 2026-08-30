@@ -20,4 +20,5 @@ The study is conducted entirely using Python and makes use of the following libr
     stable-baselines3==2.9.0
     stable-baselines3[extra]==2.9.0
     optuna==4.9.0
+    notebook==7.6.2
 ```

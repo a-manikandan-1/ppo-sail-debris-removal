@@ -11,10 +11,8 @@ from scipy.integrate import solve_ivp
 from constants import *
 from utils import (
     coe2meoe,
-    debrisDynamics,
     getSolarPosition,
     meoe2coe,
-    meoe2rv,
     sailDynamics,
     wrapCircularAngle,
 )
@@ -23,7 +21,7 @@ from utils import (
 class OrbitRaisingEnv(gym.Env):
     metadata = {"render_modes": []}  # noqa: RUF012
 
-    def __init__(self, dt: float=60, maxTime: float=365*86400., sailAltitude0: float=7E+05, debrisAltitude0: float=1E+06, inc0: float=np.deg2rad(60), raan0: float=0.0, ac: float=1E-04, coneRateMax: float=np.deg2rad(0.5), clockRateMax: float=np.deg2rad(0.5), eScale: float=0.05, hScale: float=0.01, kScale: float=0.01, posThreshold: float=1000, velThreshold: float=1, divergenceFactor: int=100):
+    def __init__(self, dt: float=60, maxTime: float=365*86400., sailAltitude0: float=7E+05, debrisAltitude0: float=1E+06, inc0: float=np.deg2rad(60), raan0: float=0.0, ac: float=1E-04, coneRateMax: float=np.deg2rad(0.5), clockRateMax: float=np.deg2rad(0.5), altThreshold: float=500.0, divergenceFactor: int=100):
         """
             Environment simulating the raising of a solar sail from 700 km to 1000 km. Dynamics follow from the variational equations in MEOEs with the J2 effect and SRP as perturbations.
 
@@ -38,11 +36,7 @@ class OrbitRaisingEnv(gym.Env):
             ac: characteristic acceleration of the solar sail [m/s^2]
             coneRateMax: maximum slew rate of the cone angle [rad/s]
             clockRateMax: maximum slew rate of the clock angle [rad/s]
-            eScale: normalization factor for f and g [-]
-            hScale: normalization factor for h [-]
-            kScale: normalization factor for k [-]
-            posThreshold: relative distance reward threshold to indicate CW equations validity [m]
-            velThreshold: relative velocity reward threshold to indicate CW equations validity [m/s]
+            altThreshold: tolerance to call successful termination [m]
             divergenceFactor: how many times larger than the initial altitude separation to call divergence [-]
         """
 
@@ -51,8 +45,7 @@ class OrbitRaisingEnv(gym.Env):
         # simulation parameters
         self.dt = dt
         self.maxTime = maxTime
-        self.posThreshold = posThreshold
-        self.velThreshold = velThreshold 
+        self.altThreshold = altThreshold
         self.divergenceFactor = divergenceFactor
 
         # problem parameters
@@ -69,22 +62,18 @@ class OrbitRaisingEnv(gym.Env):
         # action space: [alphaDot, deltaDot] in normalized units
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32) 
 
-        # observation space: [dp, df, dg, dh, dk, sindL, cosdL, alphan, sindelta, cosdelta] in normalized units
-        self.eScale = eScale
-        self.hScale = hScale
-        self.kScale = kScale
+        # observation space: [dAlt, alphan, sindelta, cosdelta] in normalized units
         self.observation_space = spaces.Box(
-            low=np.array([-np.inf, -np.inf, -np.inf, -np.inf, -np.inf, -1.0, -1.0, 0.0, -1.0, -1.0]),
-            high = np.array([np.inf, np.inf, np.inf, np.inf, np.inf, 1.0, 1.0, 1.0, 1.0, 1.0]),
+            low=np.array([-np.inf, 0.0, -1.0, -1.0]),
+            high = np.array([np.inf, 1.0, 1.0, 1.0]),
             dtype=np.float32
         )
 
         # placeholders
+        self.sailAltitude = sailAltitude0
         self.sailState = np.zeros(6, dtype=float)
-        self.debrisState = np.zeros(6, dtype=float)
         self.coneAngle = 0.0
         self.clockAngle = 0.0
-        self.history = {}
 
     def reset(self, *, seed: int | None=None, options: dict | None=None):
         """
@@ -109,22 +98,11 @@ class OrbitRaisingEnv(gym.Env):
         self.coneAngle = rng.uniform(0.0, np.pi/2)
         self.clockAngle = rng.uniform(0.0, 2*np.pi)
 
-        # randomize debris angular position
-        debrisL = rng.uniform(0.0, 2*np.pi)
-
+        self.sailAltitude = self.sailAltitude0
         self.sailState = coe2meoe(a=EARTH_RADIUS+self.sailAltitude0, e=0.0, i=self.inc0, raan=self.raan0, aop=0.0, nu=sailL-self.raan0)
 
-        self.debrisState = coe2meoe(a=EARTH_RADIUS+self.debrisAltitude0, e=0.0, i=self.inc0, raan=self.raan0, aop=0.0, nu=debrisL-self.raan0)
-        debrisSol = solve_ivp(debrisDynamics, (0.0, self.maxTime), self.debrisState, dense_output=True, rtol=1E-06, atol=1E-09)
-        self._debrisSol = debrisSol.sol
-
-        sailStateRV = meoe2rv(*self.sailState)
-        debrisStateRV = meoe2rv(*self.debrisState)
-
-        self.prevRelDist = np.linalg.norm(sailStateRV[:3] - debrisStateRV[:3])
-        self.prevRelVel = np.linalg.norm(sailStateRV[3:] - debrisStateRV[3:])
-        self.relDist = self.prevRelDist
-        self.relVel = self.prevRelVel
+        self.prevAltDiff = np.abs(self.sailAltitude - self.debrisAltitude0)
+        self.altDiff = self.prevAltDiff
 
         return self._getObs(), self._getInfo()
 
@@ -158,7 +136,7 @@ class OrbitRaisingEnv(gym.Env):
         sailSol = solve_ivp(sailDynamics, tspan, y0Sail, args=(self.t, self.coneAngle, coneRate, self.clockAngle, clockRate, self.ac, raSun, decSun, rSun), rtol=1E-08, atol=1E-12)
 
         self.sailState = sailSol.y[:, -1]
-        self.debrisState = self._debrisSol(self.t)
+        self.sailAltitude = meoe2coe(*self.sailState)[0] - EARTH_RADIUS
         self.t += self.dt
         self.coneAngle = np.clip(self.coneAngle + coneRate * self.dt, 0.0, np.pi/2)
         self.clockAngle = wrapCircularAngle(self.clockAngle + clockRate * self.dt)
@@ -175,16 +153,10 @@ class OrbitRaisingEnv(gym.Env):
         """
             Returns the observation vector.
         """
-        dp, df, dg, dh, dk, dL = self.sailState-self.debrisState
-        dL = ((dL+np.pi) % (2*np.pi)) - np.pi
+        dAlt = self.sailAltitude - self.debrisAltitude0
+
         obs = np.array([
-            dp/(self.sailAltitude0 - self.debrisAltitude0), 
-            df/self.eScale, 
-            dg/self.eScale, 
-            dh/self.hScale, 
-            dk/self.kScale, 
-            np.sin(dL), 
-            np.cos(dL), 
+            dAlt,
             self.coneAngle/(np.pi/2), 
             np.sin(self.clockAngle), 
             np.cos(self.clockAngle)
@@ -199,10 +171,8 @@ class OrbitRaisingEnv(gym.Env):
         info = {
             "time": self.t,
             "sailState": self.sailState,
-            "sailAltitude": meoe2coe(*self.sailState)[0] - EARTH_RADIUS,
-            "debrisState": self.debrisState,
-            "debrisAltitude": meoe2coe(*self.debrisState)[0] - EARTH_RADIUS,
-            "relDist": self.relDist,
+            "sailAltitude": self.sailAltitude,
+            "altDiff": self.altDiff,
             "coneAngle": self.coneAngle,
             "clockAngle": self.clockAngle
         }
@@ -211,39 +181,28 @@ class OrbitRaisingEnv(gym.Env):
 
     def _checkTerminationAndReward(self):
         """
-            Checks if the solar sail has reached a threshold region where the variational equations in MEOEs can be swapped for the Clohessy-Wiltshire equations.
+            Checks if the solar sail has reached the debris altitude.
 
             Calculates the reward for the current step following the expression:
 
-            Reward =  1.0 * relative position change normalized
-                    + 1.0 * relative velocity change normalized
-                    - 0.01 * relative position in threshold units
-                    - 0.01 * relative velocity in threshold units
-                    - 0.01
+            Reward =  1.0 * altitude difference normalized
+                    - 0.01 * altitude difference in threshold units
                     + 100 * [if within threshold]
                     - 100 * [if states are diverging]
         """
+        self.altDiff = np.abs(self.sailAltitude - self.debrisAltitude0)
 
-        rvSail = meoe2rv(*self.sailState)
-        rvDebris = meoe2rv(*self.debrisState)
-
-        self.relDist = np.linalg.norm(rvSail[:3] - rvDebris[:3]) 
-        self.relVel = np.linalg.norm(rvSail[3:] - rvDebris[3:])
-
-        safeTerminate = (self.relDist <= self.posThreshold) and (self.relVel <= self.velThreshold)
-        unsafeTerminate = (self.relDist >= self.divergenceDistance)
+        safeTerminate = (self.altDiff <= self.altThreshold)
+        unsafeTerminate = (self.altDiff >= self.divergenceDistance)
 
         terminated = safeTerminate or unsafeTerminate
 
-        posThresholdNorm = self.relDist/self.posThreshold
-        posChangeNorm = (self.prevRelDist - self.relDist)/self.posThreshold
-        velThresholdNorm = self.relVel/self.velThreshold
-        velChangeNorm = (self.prevRelVel - self.relVel)/self.velThreshold
+        altThresholdNorm = self.altDiff/self.distance0
+        altChangeNorm = (self.prevAltDiff - self.altDiff)/self.distance0
 
-        reward = 1.0*posChangeNorm + 1.0*velChangeNorm - 0.01*posThresholdNorm - 0.01*velThresholdNorm - 0.01 + (100 if safeTerminate else 0) + (-100 if unsafeTerminate else 0)
+        reward = 1.0*altChangeNorm - 0.01*altThresholdNorm + (100 if safeTerminate else 0) + (-100 if unsafeTerminate else 0)
 
-        self.prevRelDist = self.relDist
-        self.prevRelVel = self.relVel
+        self.prevAltDiff = self.altDiff
 
         return bool(terminated), reward
 
