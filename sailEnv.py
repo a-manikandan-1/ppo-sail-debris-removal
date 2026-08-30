@@ -21,9 +21,9 @@ from utils import (
 class OrbitRaisingEnv(gym.Env):
     metadata = {"render_modes": []}  # noqa: RUF012
 
-    def __init__(self, dt: float=60, maxTime: float=365*86400., sailAltitude0: float=7E+05, debrisAltitude0: float=1E+06, inc0: float=np.deg2rad(60), raan0: float=0.0, ac: float=1E-04, coneRateMax: float=np.deg2rad(0.5), clockRateMax: float=np.deg2rad(0.5), altThreshold: float=500.0, divergenceFactor: int=100):
+    def __init__(self, dt: float=60, maxTime: float=365*86400., sailAltitude0: float=8E+05, debrisAltitude0: float=1E+06, inc0: float=np.deg2rad(60), raan0: float=0.0, ac: float=1E-04, coneRateMax: float=np.deg2rad(0.5), clockRateMax: float=np.deg2rad(0.5), altThreshold: float=500.0, divergenceFactor: int=100):
         """
-            Environment simulating the raising of a solar sail from 700 km to 1000 km. Dynamics follow from the variational equations in MEOEs with the J2 effect and SRP as perturbations.
+            Environment simulating the raising of a solar sail from 800 km to 1000 km. Dynamics follow from the variational equations in MEOEs with the J2 effect and SRP as perturbations.
 
             PARAMETERS
             ----------
@@ -133,7 +133,7 @@ class OrbitRaisingEnv(gym.Env):
         tspan = (self.t, self.t+self.dt)
         raSun, decSun, rSun = getSolarPosition(self.t)
 
-        sailSol = solve_ivp(sailDynamics, tspan, y0Sail, args=(self.t, self.coneAngle, coneRate, self.clockAngle, clockRate, self.ac, raSun, decSun, rSun), rtol=1E-08, atol=1E-12)
+        sailSol = solve_ivp(sailDynamics, tspan, y0Sail, args=(self.t, self.coneAngle, coneRate, self.clockAngle, clockRate, self.ac, raSun, decSun, rSun), rtol=1E-06, atol=1E-09)
 
         self.sailState = sailSol.y[:, -1]
         self.sailAltitude = meoe2coe(*self.sailState)[0] - EARTH_RADIUS
@@ -156,7 +156,7 @@ class OrbitRaisingEnv(gym.Env):
         dAlt = self.sailAltitude - self.debrisAltitude0
 
         obs = np.array([
-            dAlt,
+            dAlt/self.distance0,
             self.coneAngle/(np.pi/2), 
             np.sin(self.clockAngle), 
             np.cos(self.clockAngle)
@@ -186,7 +186,6 @@ class OrbitRaisingEnv(gym.Env):
             Calculates the reward for the current step following the expression:
 
             Reward =  1.0 * altitude difference normalized
-                    - 0.01 * altitude difference in threshold units
                     + 100 * [if within threshold]
                     - 100 * [if states are diverging]
         """
@@ -197,10 +196,9 @@ class OrbitRaisingEnv(gym.Env):
 
         terminated = safeTerminate or unsafeTerminate
 
-        altThresholdNorm = self.altDiff/self.distance0
         altChangeNorm = (self.prevAltDiff - self.altDiff)/self.distance0
 
-        reward = 1.0*altChangeNorm - 0.01*altThresholdNorm + (100 if safeTerminate else 0) + (-100 if unsafeTerminate else 0)
+        reward = 1.0*altChangeNorm + (100 if safeTerminate else 0) + (-100 if unsafeTerminate else 0)
 
         self.prevAltDiff = self.altDiff
 
