@@ -1,8 +1,5 @@
 __pycache__/
 .ipynb_checkpoints/
 .ppo/
-output/
-temp/
 LunarLander.ipynb
-SolarSail.ipynb
 temp.py
